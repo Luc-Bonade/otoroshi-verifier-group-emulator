@@ -3,12 +3,13 @@ package fr.maif.otoroshi.plugins.verifiergroup
 import akka.stream.Materializer
 import otoroshi.env.Env
 import otoroshi.gateway.Errors
+import otoroshi.models.RefJwtVerifier
 import otoroshi.script._
 import otoroshi.utils.syntax.implicits._
 import play.api.Logger
 import play.api.libs.json._
+import play.api.libs.ws.DefaultWSCookie
 import play.api.mvc.{Result, Results}
-import play.api.libs.ws.{DefaultWSCookie, WSCookie}
 
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -31,12 +32,13 @@ class VerifierGroupEmulator extends RequestTransformer {
         |   - `strict`, an optional flag to change the default plugin's instance `strict` value witch defaukt is false
         |   - `groups`,  a map (Object), with the differents groupId as keys, and an array with verifier Id defining the group members
         |""".stripMargin)
+
   override def defaultConfig: Option[JsObject] =
     Some(
       Json.obj(
         "VerifierGroupEmulator" -> Json.obj(
           "groupId" -> "",
-                  "strict" -> false
+          "strict" -> false
         )
       )
     )
@@ -79,49 +81,29 @@ class VerifierGroupEmulator extends RequestTransformer {
           ).map(Left.apply)
       case Some(jsGroupVerifiersId) => val groupVerifiersId = jsGroupVerifiersId.value.map(v => v.as[String])
         logger.trace("group Id : " + groupId)
-        logger.trace("group verifiers Id : " + jsGroupVerifiersId)
-        env.datastores.globalJwtVerifierDataStore.findAllById(groupVerifiersId)
-          .map(jwtVerifiers => {
-            // TODO find à way to stop the verifier loop on the first succes
-            Future.sequence(jwtVerifiers.filter(v => v.enabled).map { jwtVerifier =>
-              jwtVerifier.shouldBeVerified(context.request.path).flatMap(v => v match {
-                case false => Right(context.otoroshiRequest).future
-                case true => {
-                  logger.trace("call verifyGen of verifier with Id :" + jwtVerifier.id)
-                  jwtVerifier.verifyGen[HttpRequest](context.request, context.descriptor, context.apikey, context.user, context.attrs.get(otoroshi.plugins.Keys.ElCtxKey).get, context.attrs) {
-                    jwtInjection =>
-                      jwtInjection.decodedToken match {
-                        case None if !jwtVerifier.strict => Left(Results.Forbidden(Json.obj())).future
-                        case None if jwtVerifier.strict => Right(context.otoroshiRequest).future
-                        case Some(_) => Right(
-                          context.otoroshiRequest.copy(
-                            headers = (context.otoroshiRequest.headers ++ jwtInjection.additionalHeaders)
-                              .filter(entry => jwtInjection.removeHeaders.contains(entry._1)),
-                            cookies = (context.otoroshiRequest.cookies ++ jwtInjection.additionalCookies
-                              .map(entry => DefaultWSCookie(entry._1, entry._2)))
-                              .filter(entry => jwtInjection.removeCookies.contains(entry.name))
-                          )
-                        ).future
-                      }
-                  }
-                }
-              })
-            }).map(s => s.collectFirst { case Right(v) => Right(v) })
-          }).flatMap(x => x).flatMap(r => r match {
-          case None if !strict => Right(context.otoroshiRequest).future
-          case None if strict => Errors
-            .craftResponseResult(
-              "Forbidden Invalid Token",
-              Results.Forbidden,
-              context.request,
-              None,
-              None,
-              attrs = context.attrs
-            ).map(Left.apply)
-          case Some(v) => v.future
-        })
+        logger.trace("group verifiers Id : " + groupVerifiersId)
+        groupVerifiersId match {
+          case s if !strict && s.isEmpty => Right(context.otoroshiRequest).future
+          case _ => RefJwtVerifier(groupVerifiersId, true, Seq.empty).verifyGen[HttpRequest](context.request, context.descriptor, context.apikey, context.user, context.attrs.get(otoroshi.plugins.Keys.ElCtxKey).get, context.attrs) {
+            jwtInjection =>
+              jwtInjection.decodedToken match {
+                case None => Left(Results.Forbidden(Json.obj("error" -> "Forbidden JWT Token validation failed"))).future
+                case Some(_) => Right(
+                  context.otoroshiRequest.copy(
+                    headers = (context.otoroshiRequest.headers ++ jwtInjection.additionalHeaders)
+                      .filter(entry => jwtInjection.removeHeaders.contains(entry._1)),
+                    cookies = (context.otoroshiRequest.cookies ++ jwtInjection.additionalCookies
+                      .map(entry => DefaultWSCookie(entry._1, entry._2)))
+                      .filter(entry => jwtInjection.removeCookies.contains(entry.name))
+                  )
+                ).future
+              }
+          }.map(x => x match {
+            case Left(_) => Left(Results.Forbidden(Json.obj("error" -> "Forbidden JWT Token validation failed")))
+            case x => x
+          })
+        }
     }
-
   }
 }
 
