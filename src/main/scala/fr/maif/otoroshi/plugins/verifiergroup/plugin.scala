@@ -8,6 +8,7 @@ import otoroshi.utils.syntax.implicits._
 import play.api.Logger
 import play.api.libs.json._
 import play.api.mvc.{Result, Results}
+import play.api.libs.ws.{DefaultWSCookie, WSCookie}
 
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -51,6 +52,7 @@ class VerifierGroupEmulator extends RequestTransformer {
           "type" -> "boolean",
           "label" -> "is this verifier group strict"
         )
+
       )
     )
 
@@ -83,7 +85,7 @@ class VerifierGroupEmulator extends RequestTransformer {
             // TODO find à way to stop the verifier loop on the first succes
             Future.sequence(jwtVerifiers.filter(v => v.enabled).map { jwtVerifier =>
               jwtVerifier.shouldBeVerified(context.request.path).flatMap(v => v match {
-                case false => Left(Results.Unauthorized(Json.obj())).future
+                case false => Right(context.otoroshiRequest).future
                 case true => {
                   logger.trace("call verifyGen of verifier with Id :" + jwtVerifier.id)
                   jwtVerifier.verifyGen[HttpRequest](context.request, context.descriptor, context.apikey, context.user, context.attrs.get(otoroshi.plugins.Keys.ElCtxKey).get, context.attrs) {
@@ -93,7 +95,11 @@ class VerifierGroupEmulator extends RequestTransformer {
                         case None if jwtVerifier.strict => Right(context.otoroshiRequest).future
                         case Some(_) => Right(
                           context.otoroshiRequest.copy(
-                            headers = context.otoroshiRequest.headers ++ jwtInjection.additionalHeaders
+                            headers = (context.otoroshiRequest.headers ++ jwtInjection.additionalHeaders)
+                              .filter(entry => jwtInjection.removeHeaders.contains(entry._1)),
+                            cookies = (context.otoroshiRequest.cookies ++ jwtInjection.additionalCookies
+                              .map(entry => DefaultWSCookie(entry._1, entry._2)))
+                              .filter(entry => jwtInjection.removeCookies.contains(entry.name))
                           )
                         ).future
                       }
@@ -102,7 +108,8 @@ class VerifierGroupEmulator extends RequestTransformer {
               })
             }).map(s => s.collectFirst { case Right(v) => Right(v) })
           }).flatMap(x => x).flatMap(r => r match {
-          case None => Errors
+          case None if !strict => Right(context.otoroshiRequest).future
+          case None if strict => Errors
             .craftResponseResult(
               "Forbidden Invalid Token",
               Results.Forbidden,
