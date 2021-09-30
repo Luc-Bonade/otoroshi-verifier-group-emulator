@@ -1,0 +1,9 @@
+target/
+.bsp
+.idea
+.metals
+.vscode
+.DS_Store
+/*.log
+*.jar
+/logs
