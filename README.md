@@ -1,4 +1,4 @@
-# otoroshi-verifier-group-emulator
+# otoroshi-verifier-group-emulator-plugin
 
 A plugin allowing to emulate a verifier group feature.
 
